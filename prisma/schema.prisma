@@ -1,0 +1,345 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// USUARIOS
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  SST
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(SST)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  matricesCreated RiskMatrix[] @relation("MatrixCreatedBy")
+  matricesUpdated RiskMatrix[] @relation("MatrixUpdatedBy")
+  auditLogs       AuditLog[]
+}
+
+// ---------------------------------------------------------------------------
+// EMPRESAS Y CATALOGOS ESCALADOS POR EMPRESA
+// ---------------------------------------------------------------------------
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  nit       String?  @unique
+  sector    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  matrices  RiskMatrix[]
+  processes Process[]
+  areas     Area[]
+}
+
+// Proceso (Producción, Mantenimiento, Administración...) - catálogo por empresa
+model Process {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  activities Activity[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+// Zona/Lugar (Planta, Bodega, Oficinas...) - catálogo por empresa
+model Area {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  tasks Task[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// MATRIZ, ACTIVIDADES Y TAREAS
+// ---------------------------------------------------------------------------
+
+enum MatrixStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model RiskMatrix {
+  id           String       @id @default(cuid())
+  // Nulo solo para matrices plantilla (isTemplate = true) que no pertenecen a una empresa real.
+  companyId    String?
+  company      Company?     @relation(fields: [companyId], references: [id])
+  name         String
+  version      Int          @default(1)
+  status       MatrixStatus @default(DRAFT)
+  isTemplate   Boolean      @default(false)
+  templateSector String?
+
+  methodologyVersionId String
+  methodologyVersion   RiskMethodologyVersion @relation(fields: [methodologyVersionId], references: [id])
+
+  createdById String
+  createdBy   User     @relation("MatrixCreatedBy", fields: [createdById], references: [id])
+  updatedById String?
+  updatedBy   User?    @relation("MatrixUpdatedBy", fields: [updatedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks Task[]
+
+  @@index([companyId])
+}
+
+// Actividad (Transformación de plátano...) - reutilizable dentro de un proceso
+model Activity {
+  id        String   @id @default(cuid())
+  processId String
+  process   Process  @relation(fields: [processId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  tasks Task[]
+
+  @@index([processId])
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  riskMatrixId String
+  riskMatrix   RiskMatrix @relation(fields: [riskMatrixId], references: [id], onDelete: Cascade)
+  activityId   String
+  activity     Activity   @relation(fields: [activityId], references: [id])
+  areaId       String
+  area         Area       @relation(fields: [areaId], references: [id])
+  name         String
+  routine      Boolean    @default(true)
+  // Etapa del wizard hasta donde avanzó esta tarea (para "continuar después")
+  wizardStep   Int        @default(1)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  hazards Hazard[]
+
+  @@index([riskMatrixId])
+  @@index([activityId])
+  @@index([areaId])
+}
+
+// ---------------------------------------------------------------------------
+// PELIGROS (una tarea puede tener varios)
+// ---------------------------------------------------------------------------
+
+model Hazard {
+  id     String @id @default(cuid())
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Ambos apuntan a CatalogItem (categorías CLASIFICACION y PELIGRO)
+  classificationId String
+  classification   CatalogItem @relation("HazardClassification", fields: [classificationId], references: [id])
+  descriptionId    String
+  description      CatalogItem @relation("HazardDescription", fields: [descriptionId], references: [id])
+
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  existingControls    ExistingControl?
+  riskAssessment       RiskAssessment?
+  controlCriteria      ControlCriteria?
+  interventionMeasure  InterventionMeasure?
+
+  @@index([taskId])
+  @@index([classificationId])
+  @@index([descriptionId])
+}
+
+// ---------------------------------------------------------------------------
+// CONTROLES EXISTENTES (fuente / medio / individuo)
+// ---------------------------------------------------------------------------
+
+model ExistingControl {
+  id       String @id @default(cuid())
+  hazardId String @unique
+  hazard   Hazard @relation(fields: [hazardId], references: [id], onDelete: Cascade)
+
+  source     String?
+  medium     String?
+  individual String?
+
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// EVALUACION DEL RIESGO (motor GTC 45 - ver /src/lib/risk-engine)
+// nd/ne/nc son INGRESADOS por el usuario; np/nr e interpretaciones son
+// CALCULADOS por riskCalculationService y solo se persisten como resultado.
+// ---------------------------------------------------------------------------
+
+model RiskAssessment {
+  id       String @id @default(cuid())
+  hazardId String @unique
+  hazard   Hazard @relation(fields: [hazardId], references: [id], onDelete: Cascade)
+
+  nd Int // Nivel de Deficiencia (ingresado)
+  ne Int // Nivel de Exposición (ingresado)
+  nc Int // Nivel de Consecuencia (ingresado)
+
+  np               Int    // calculado = nd * ne
+  npInterpretation String // calculado
+  nr               Int    // calculado = np * nc
+  nrInterpretation String // calculado
+  priority         String // calculado (prioridad de intervención)
+
+  calculatedAt DateTime @updatedAt
+
+  @@index([hazardId])
+}
+
+// ---------------------------------------------------------------------------
+// CRITERIOS PARA ESTABLECER CONTROLES
+// ---------------------------------------------------------------------------
+
+model ControlCriteria {
+  id       String @id @default(cuid())
+  hazardId String @unique
+  hazard   Hazard @relation(fields: [hazardId], references: [id], onDelete: Cascade)
+
+  exposedWorkers      Int
+  worstConsequence    String
+  hasLegalRequirement Boolean @default(false)
+
+  legalRequirement LegalRequirement?
+
+  updatedAt DateTime @updatedAt
+}
+
+model LegalRequirement {
+  id                String          @id @default(cuid())
+  controlCriteriaId String          @unique
+  controlCriteria   ControlCriteria @relation(fields: [controlCriteriaId], references: [id], onDelete: Cascade)
+
+  standard    String // Norma
+  article     String? // Artículo
+  description String?
+  referenceUrl String?
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// MEDIDAS DE INTERVENCION (jerarquía de controles)
+// ---------------------------------------------------------------------------
+
+model InterventionMeasure {
+  id       String @id @default(cuid())
+  hazardId String @unique
+  hazard   Hazard @relation(fields: [hazardId], references: [id], onDelete: Cascade)
+
+  elimination    String?
+  substitution   String?
+  engineering    String?
+  administrative String?
+  ppe            String?
+
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// CATALOGOS CONFIGURABLES (Configuración > ...)
+// ---------------------------------------------------------------------------
+
+enum CatalogCategory {
+  CLASIFICACION_PELIGRO // Biológico, Físico, Químico, Psicosocial, Biomecánico, Condiciones de seguridad, Fenómenos naturales
+  PELIGRO_DESCRIPCION // hijo de CLASIFICACION_PELIGRO vía parentId
+  CONTROL_FUENTE
+  CONTROL_MEDIO
+  CONTROL_INDIVIDUO
+  CONSECUENCIA // "peor consecuencia" (Etapa 6)
+  MEDIDA_ELIMINACION
+  MEDIDA_SUSTITUCION
+  MEDIDA_INGENIERIA
+  MEDIDA_ADMINISTRATIVA
+  MEDIDA_EPP
+}
+
+model CatalogItem {
+  id          String          @id @default(cuid())
+  category    CatalogCategory
+  name        String
+  description String?
+  // Solo aplica a PELIGRO_DESCRIPCION -> apunta a un CatalogItem de CLASIFICACION_PELIGRO
+  parentId    String?
+  parent      CatalogItem?    @relation("CatalogHierarchy", fields: [parentId], references: [id])
+  children    CatalogItem[]   @relation("CatalogHierarchy")
+  active      Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  hazardsAsClassification Hazard[] @relation("HazardClassification")
+  hazardsAsDescription    Hazard[] @relation("HazardDescription")
+
+  @@index([category])
+  @@index([parentId])
+}
+
+// ---------------------------------------------------------------------------
+// METODOLOGIA GTC 45 (versionada, nunca hardcodeada en el código)
+// ---------------------------------------------------------------------------
+
+model RiskMethodologyVersion {
+  id        String   @id @default(cuid())
+  name      String // ej. "GTC 45:2012 (oficial)"
+  isActive  Boolean  @default(false)
+
+  // Estructura JSON validada por Zod en /src/lib/risk-engine/methodology.ts
+  ndLevels         Json // [{ value, label, description }]
+  neLevels         Json
+  ncLevels         Json
+  npRanges         Json // [{ min, max, label }]
+  nrRanges         Json // [{ min, max, label, priority, acceptability }]
+
+  createdAt DateTime @default(now())
+
+  matrices RiskMatrix[]
+}
+
+// ---------------------------------------------------------------------------
+// AUDITORIA
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String
+  entityId   String
+  action     String // CREATE | UPDATE | DELETE | DUPLICATE
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  diff       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+}
