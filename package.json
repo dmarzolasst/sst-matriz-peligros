@@ -2,6 +2,9 @@
   "name": "sst-matriz-peligros",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -19,7 +22,6 @@
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
     "@prisma/client": "6.19.3",
-    "@tanstack/react-table": "^9.2.4",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
